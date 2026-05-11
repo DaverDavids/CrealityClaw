@@ -1,0 +1,5 @@
+# Camera 1
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", ENV{ID_V4L_CAPABILITIES}==":capture:", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="08e5", SYMLINK+="webcam1"
+
+# Camera 2
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", ENV{ID_V4L_CAPABILITIES}==":capture:", ATTRS{idVendor}=="349c", ATTRS{idProduct}=="0411", SYMLINK+="webcam2"

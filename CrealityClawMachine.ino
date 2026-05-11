@@ -23,11 +23,11 @@ HardwareSerial PrinterSerial(1);
 // Servo configuration
 Servo clawServo;
 int SERVO_OPEN_ANGLE = 0;
-int SERVO_CLOSE_ANGLE = 54;
+int SERVO_CLOSE_ANGLE = 60;
 
 // WiFi credentials
-const char* ssid = MYSSID;
-const char* password = MYPSK;
+const char* ssid = MYSSIDIOT;
+const char* password = MYPSKIOT;
 const char* hostname = "crealityclaw";
 
 // Position limits

@@ -1,0 +1,17 @@
+[Unit]
+Description=Claw Machine Camera 1 Stream
+After=network.target
+
+[Service]
+Type=simple
+User=rawdr
+ExecStartPre=/bin/sleep 2
+ExecStart=/home/pi/cam1.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=5
+KillSignal=SIGINT
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

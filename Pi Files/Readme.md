@@ -1,0 +1,2 @@
+Utilize mjpg_streamer or ustreamer for the camera services. Service files are for systemd. 
+The cam scripts are expecting a /dev/webcam1 and /dev/webcam2. You must modify your udevadm rules so the cameras you want are linked to these names.
