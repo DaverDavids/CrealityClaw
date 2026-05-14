@@ -696,11 +696,10 @@ void sendGcode(String command, bool echo = true) {
         sendGcodeRaw(lowerCmd);
         currentPos.Z = WALL_Z_TRIGGER - 5.0;
         
-        // --- FIX: Update targetZ so subsequent checks know we are safe ---
+        // Update targetZ so subsequent checks know we are safe
         if (!hasAxis(cmdUpper, 'Z')) {
            targetZ = currentPos.Z;
         }
-        // ---------------------------------------------------------------
 
         delay(100);
         updatePositionInternal();
@@ -904,7 +903,55 @@ void readPrinterBus() {
 }
 
 // ============ TWITCH INTEGRATION ============
-// Helper to extract a variable from a specific pattern found anywhere in the message
+
+// Returns true if 's' is a valid numeric string (optional leading sign, digits, optional single dot).
+// Allows an optional leading axis letter (x/y/X/Y) followed by optional whitespace before the number.
+// e.g. "50", "50.5", "-3.2", "x50", "x 50", "X 50.0" all pass.
+// Returns false and leaves outVal unchanged on any invalid input.
+bool parseClawCoord(String s, float &outVal) {
+  s.trim();
+  if (s.length() == 0) return false;
+
+  // Strip optional leading axis letter (x or y, case-insensitive)
+  int start = 0;
+  char first = s.charAt(0);
+  if (first == 'x' || first == 'X' || first == 'y' || first == 'Y') {
+    start = 1;
+    // Allow optional whitespace between the axis letter and the number
+    while (start < (int)s.length() && s.charAt(start) == ' ') start++;
+  }
+
+  if (start >= (int)s.length()) return false;
+
+  // Validate remaining characters: optional leading sign, then digits with at most one dot
+  int i = start;
+  if (s.charAt(i) == '-' || s.charAt(i) == '+') i++;
+  if (i >= (int)s.length()) return false; // sign only is not valid
+
+  bool hasDot = false;
+  bool hasDigit = false;
+  while (i < (int)s.length()) {
+    char c = s.charAt(i);
+    if (c == '.') {
+      if (hasDot) return false; // two dots → invalid
+      hasDot = true;
+    } else if (isDigit(c)) {
+      hasDigit = true;
+    } else {
+      return false; // any non-numeric character → invalid
+    }
+    i++;
+  }
+
+  if (!hasDigit) return false;
+
+  outVal = s.substring(start).toFloat();
+  return true;
+}
+
+// Helper to extract a variable from a specific pattern found anywhere in the message.
+// For coordinate-type vars (name length == 1, single uppercase letter X/Y/Z),
+// the captured value is additionally validated as a real number.
 bool extractArg(String message, String pattern, String& varName, String& varValue) {
   if (pattern.length() == 0) return false;
   
@@ -926,28 +973,31 @@ bool extractArg(String message, String pattern, String& varName, String& varValu
   // Value starts after the prefix
   int valStart = startIdx + prefix.length();
   
-  // --- FIX: Stop at space OR comma ---
+  // Stop at space OR comma
   int spaceIdx = message.indexOf(' ', valStart);
   int commaIdx = message.indexOf(',', valStart);
   
   int valEnd = message.length();
-  
-  // If we found a space, and it's closer than the end, use it
-  if (spaceIdx >= 0 && spaceIdx < valEnd) {
-    valEnd = spaceIdx;
-  }
-  
-  // If we found a comma, and it's closer than the current end (or space), use it
-  if (commaIdx >= 0 && commaIdx < valEnd) {
-    valEnd = commaIdx;
-  }
-  // ------------------------------------
+  if (spaceIdx >= 0 && spaceIdx < valEnd) valEnd = spaceIdx;
+  if (commaIdx >= 0 && commaIdx < valEnd) valEnd = commaIdx;
   
   String val = message.substring(valStart, valEnd);
   val.trim();
   
-  // STRICT CHECK: Ensure we didn't capture empty string
   if (val.length() == 0) return false;
+
+  // For single-letter axis variable names (X, Y, Z), validate the value is numeric.
+  // This prevents garbage like "abc" from silently becoming 0.0 via toFloat().
+  if (name.length() == 1) {
+    char n = name.charAt(0);
+    if (n == 'X' || n == 'Y' || n == 'Z') {
+      float dummy;
+      if (!parseClawCoord(val, dummy)) {
+        logWarning("extractArg: non-numeric value '" + val + "' for axis var " + name);
+        return false;
+      }
+    }
+  }
   
   varName = name;
   varValue = val;
@@ -1068,6 +1118,7 @@ void processTwitchMessage(String message, String username) {
       varCount++;
 
       // Scan for all 5 arguments defined in this command
+      bool argsFailed = false;
       for(int k=0; k<5; k++) {
         String pat = twitchCommands[i].args[k];
         if(pat.length() > 0) {
@@ -1078,8 +1129,31 @@ void processTwitchMessage(String message, String username) {
                vars[varCount] = vVal;
                varCount++;
              }
+           } else {
+             // A non-empty pattern that failed to extract a valid value means
+             // the user's input was malformed — flag it.
+             // Only treat as hard failure for axis coordinate patterns
+             // (single uppercase letter inside braces).
+             int ob = pat.indexOf('{');
+             int cb = pat.indexOf('}', ob);
+             if (ob >= 0 && cb > ob) {
+               String pname = pat.substring(ob + 1, cb);
+               if (pname.length() == 1) {
+                 char pc = pname.charAt(0);
+                 if (pc == 'X' || pc == 'Y' || pc == 'Z') {
+                   argsFailed = true;
+                 }
+               }
+             }
            }
         }
+      }
+
+      // If coordinate args were missing or invalid, tell the user and bail
+      if (argsFailed) {
+        logWarning("TWITCH: Invalid coordinate format from " + username);
+        sendTwitchMessage("@" + username + " Invalid coordinates! Usage: !claw x<0-100> y<0-100>  e.g. !claw x50 y75 or !claw x50,y75");
+        break;
       }
       
       addToConsole("TWITCH: " + twitchCommands[i].trigger, "rx");
@@ -1111,7 +1185,6 @@ void processTwitchMessage(String message, String username) {
           else if (action.startsWith("DELAY:")) {
              delay(action.substring(6).toInt());
           }
-          // --- RESTORED BLOCK START ---
           else if (action.startsWith("MOVEPCT:")) {
             String params = action.substring(8);
             params.trim();
@@ -1132,12 +1205,15 @@ void processTwitchMessage(String message, String username) {
             }
 
             if (tokCount >= 2) {
-              float xPct = tok[0].toFloat();
-              float yPct = tok[1].toFloat();
-              
-              // Handle "x50" or "y50" inputs by stripping letters
-              if(tok[0].length() > 0 && isAlpha(tok[0].charAt(0))) xPct = tok[0].substring(1).toFloat();
-              if(tok[1].length() > 0 && isAlpha(tok[1].charAt(0))) yPct = tok[1].substring(1).toFloat();
+              float xPct, yPct;
+
+              // Strict numeric validation — reject if either coord is malformed
+              if (!parseClawCoord(tok[0], xPct) || !parseClawCoord(tok[1], yPct)) {
+                logWarning("MOVEPCT: invalid coordinate tokens '" + tok[0] + "' '" + tok[1] + "'");
+                sendTwitchMessage("@" + username + " Invalid coordinates! Usage: !claw x<0-100> y<0-100>  e.g. !claw x50 y75");
+                commandInProgress = false;
+                break;
+              }
 
               // Clamp 0-100
               if (xPct < 0) xPct = 0; if (xPct > 100) xPct = 100;
@@ -1155,9 +1231,14 @@ void processTwitchMessage(String message, String username) {
               
               String cmd = "G1 X" + String(targetX, 2) + " Y" + String(targetY, 2) + " F" + String(feedrate);
               sendGcode(cmd, true);
+            } else {
+              // Not enough tokens at all
+              logWarning("MOVEPCT: not enough coordinate tokens");
+              sendTwitchMessage("@" + username + " Invalid coordinates! Usage: !claw x<0-100> y<0-100>  e.g. !claw x50 y75");
+              commandInProgress = false;
+              break;
             }
           }
-          // --- RESTORED BLOCK END ---
           else {
              sendGcode(action, true);
           }
@@ -1558,9 +1639,9 @@ void handleRoot() {
   html += "yPercent=Math.max(0,Math.min(100,yPercent));";
   html += "var targetX=MIN_X+(MAX_X-MIN_X)*xPercent/100;";
   html += "var targetY=MIN_Y+(MAX_Y-MIN_Y)*yPercent/100;";
-  html += "var cmd='G1 X'+targetX.toFixed(2)+' Y'+targetY.toFixed(2)+' F3000';";  // ✅ Absolute
+  html += "var cmd='G1 X'+targetX.toFixed(2)+' Y'+targetY.toFixed(2)+' F3000';";
   html += "sendCommand(cmd);";
-  html += "currentX=targetX;";  // Update for drawing
+  html += "currentX=targetX;";
   html += "currentY=targetY;";
   html += "drawBed();";
   html += "}";
@@ -1644,630 +1725,4 @@ void handleRoot() {
   
   server.send(200, "text/html", html);
   logInfo("Sent HTML page (" + String(html.length()) + " bytes)");
-}
-
-// ============ TWITCH CONFIG PAGE ============
-void handleConfig() {
-  String html = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">";
-  html += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
-  html += "<title>Twitch Config</title>";
-  html += "<style>";
-  html += "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #1a1a1a; color: #e0e0e0; margin: 0; padding: 20px; }";
-  html += ".container { max-width: 900px; margin: 0 auto; }";
-  html += ".header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 1px solid #333; padding-bottom: 20px; }";
-  html += "h2 { margin: 0; color: #a970ff; }"; /* Twitch Purple */
-  html += "a { color: #fff; text-decoration: none; background: #333; padding: 8px 16px; border-radius: 4px; }";
-  html += ".panel { background: #252525; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.3); }";
-  html += "h3 { margin-top: 0; color: #fff; border-bottom: 1px solid #444; padding-bottom: 10px; }";
-  html += ".form-group { margin-bottom: 15px; }";
-  html += "label { display: block; margin-bottom: 5px; font-weight: 500; color: #aaa; }";
-  html += "input[type=text], input[type=password], textarea { width: 100%; padding: 10px; background: #333; border: 1px solid #444; color: #fff; border-radius: 4px; box-sizing: border-box; }";
-  html += "input:focus, textarea:focus { border-color: #a970ff; outline: none; }";
-  html += "button { cursor: pointer; padding: 10px 20px; border: none; border-radius: 4px; font-weight: bold; color: #fff; transition: opacity 0.2s; }";
-  html += "button:hover { opacity: 0.9; }";
-  html += ".btn-primary { background: #a970ff; }";
-  html += ".btn-danger { background: #d32f2f; }";
-  html += ".btn-success { background: #388e3c; }";
-  html += ".row { display: flex; gap: 10px; }";
-  html += ".col { flex: 1; }";
-  
-  // Styles for the argument inputs
-  html += ".args-container { display: flex; gap: 5px; margin-bottom: 10px; }";
-  html += ".args-container input { flex: 1; min-width: 0; font-size: 0.9em; text-align: center; }";
-  html += ".cmd-item { border: 1px solid #444; padding: 15px; margin-bottom: 15px; border-radius: 6px; background: #2a2a2a; }";
-  html += ".cmd-header { display: flex; justify-content: space-between; margin-bottom: 10px; }";
-  html += "</style></head><body><div class=\"container\">";
-
-  // --- Header ---
-  html += "<div class=\"header\">";
-  html += "<h2>👾 Twitch Configuration</h2>";
-  html += "<a href=\"/\">← Back to Dashboard</a>";
-  html += "</div>";
-
-  // --- Connection Settings ---
-  html += "<div class=\"panel\"><h3>📡 Connection Details</h3>";
-  html += "<div class=\"row\">";
-  html += "<div class=\"col\"><label>Channel</label><input type=\"text\" id=\"channel\" value=\"" + String(twitchChannel) + "\"></div>";
-  html += "<div class=\"col\"><label>Bot Username</label><input type=\"text\" id=\"nick\" value=\"" + String(twitchNick) + "\"></div>";
-  html += "</div><br>";
-  html += "<label>OAuth Token (oauth:xxxx)</label><input type=\"password\" id=\"oauth\" value=\"" + String(twitchOauth) + "\"><br><br>";
-  html += "<div class=\"row\">";
-  html += "<div class=\"col\"><label><input type=\"checkbox\" id=\"enabled\" " + String(twitchEnabled ? "checked" : "") + "> Enable Twitch Bot</label></div>";
-  html += "</div><br>";
-  html += "<button class=\"btn-primary\" onclick=\"saveConn()\">Save Connection</button> ";
-  html += "<button class=\"btn-success\" onclick=\"testConn()\">Test Connection</button>";
-  html += "</div>";
-
-  // --- Add New Command ---
-  html += "<div class=\"panel\"><h3>➕ Add Command</h3>";
-  html += "<div class=\"form-group\"><label>Trigger Word (e.g. !claw)</label>";
-  html += "<input type=\"text\" id=\"newTrigger\" placeholder=\"!claw\"></div>";
-  
-  html += "<div class=\"form-group\"><label>Arguments (Context Variables)</label>";
-  html += "<div class=\"args-container\">";
-  for(int i=0; i<5; i++) {
-    html += "<input type=\"text\" id=\"newArg" + String(i) + "\" placeholder=\"x{X}\">";
-  }
-  html += "</div><small style=\"color:#666\">Enter patterns like <b>x{X}</b> or <b>y{Y}</b>. The system finds these anywhere in the message.</small></div>";
-  
-  html += "<div class=\"form-group\"><label>Actions (G-code, CHAT:msg, DELAY:ms, CLAW:open)</label>";
-  html += "<textarea id=\"newActions\" rows=\"2\" placeholder=\"G1 X{X} Y{Y} F3000\"></textarea></div>";
-  html += "<button class=\"btn-success\" onclick=\"addCmd()\">Add Command</button>";
-  html += "</div>";
-
-  // --- Command List ---
-  html += "<div class=\"panel\"><h3>📋 Active Commands</h3>";
-  html += "<div id=\"cmdList\">Loading...</div>";
-  html += "</div>";
-
-  // --- JavaScript ---
-  html += "<script>";
-  html += "function saveConn() {";
-  html += "  var e = document.getElementById('enabled').checked ? 1 : 0;";
-  html += "  var c = document.getElementById('channel').value;";
-  html += "  var n = document.getElementById('nick').value;";
-  html += "  var o = document.getElementById('oauth').value;";
-  html += "  fetch('/twitch-save-conn?enabled='+e+'&channel='+encodeURIComponent(c)+'&nick='+encodeURIComponent(n)+'&oauth='+encodeURIComponent(o))";
-  html += "    .then(r => r.text()).then(t => alert(t));";
-  html += "}";
-
-  html += "function testConn() {";
-  html += "  fetch('/twitch-test').then(r => r.text()).then(t => alert(t));";
-  html += "}";
-
-  html += "function addCmd() {";
-  html += "  var t = document.getElementById('newTrigger').value;";
-  html += "  var a = document.getElementById('newActions').value;";
-  html += "  var q = '';";
-  html += "  for(var i=0; i<5; i++) q += '&arg'+i+'=' + encodeURIComponent(document.getElementById('newArg'+i).value);";
-  html += "  fetch('/twitch-add-cmd?trigger='+encodeURIComponent(t)+'&actions='+encodeURIComponent(a)+q)";
-  html += "    .then(r => r.text()).then(t => { alert(t); location.reload(); });";
-  html += "}";
-
-  html += "function saveCmd(idx) {";
-  html += "  var t = document.getElementById('trig_'+idx).value;";
-  html += "  var a = document.getElementById('act_'+idx).value;";
-  html += "  var q = '';";
-  html += "  for(var i=0; i<5; i++) q += '&arg'+i+'=' + encodeURIComponent(document.getElementById('arg_'+idx+'_'+i).value);";
-  html += "  fetch('/twitch-edit-cmd?index='+idx+'&trigger='+encodeURIComponent(t)+'&actions='+encodeURIComponent(a)+q)";
-  html += "    .then(r => r.text()).then(t => alert(t));";
-  html += "}";
-
-  html += "function delCmd(idx) {";
-  html += "  if(confirm('Are you sure?')) fetch('/twitch-delete-cmd?index='+idx).then(() => location.reload());";
-  html += "}";
-
-  html += "function toggleCmd(idx, checkbox) {";
-  html += "  fetch('/twitch-toggle-cmd?index='+idx+'&enabled='+(checkbox.checked?1:0));";
-  html += "}";
-
-  html += "fetch('/twitch-get-cmds').then(r => r.json()).then(data => {";
-  html += "  var h = '';";
-  html += "  data.forEach((c, i) => {";
-  html += "    h += '<div class=\"cmd-item\">';";
-  html += "    h += '<div class=\"cmd-header\">';";
-  html += "    h += '  <div><input type=\"text\" id=\"trig_'+i+'\" value=\"'+c.trigger+'\" style=\"width:150px;font-weight:bold\"></div>';";
-  html += "    h += '  <div><label><input type=\"checkbox\" '+(c.enabled?'checked':'')+' onchange=\"toggleCmd('+i+',this)\"> Enabled</label></div>';";
-  html += "    h += '</div>';";
-  
-  // Render the 5 argument boxes for editing
-  html += "    h += '<div class=\"args-container\">';";
-  html += "    for(var k=0; k<5; k++) {";
-  html += "      var val = (c.args && c.args[k]) ? c.args[k] : '';";
-  html += "      h += '<input type=\"text\" id=\"arg_'+i+'_'+k+'\" value=\"'+val+'\" placeholder=\"Arg '+(k+1)+'\">';";
-  html += "    }";
-  html += "    h += '</div>';";
-  
-  html += "    h += '<textarea id=\"act_'+i+'\" rows=\"2\">'+c.actions+'</textarea>';";
-  html += "    h += '<div style=\"margin-top:10px;text-align:right\">';";
-  html += "    h += '  <button class=\"btn-primary\" style=\"padding:5px 15px\" onclick=\"saveCmd('+i+')\">Save</button> ';";
-  html += "    h += '  <button class=\"btn-danger\" style=\"padding:5px 15px\" onclick=\"delCmd('+i+')\">Delete</button>';";
-  html += "    h += '</div></div>';";
-  html += "  });";
-  html += "  document.getElementById('cmdList').innerHTML = h || '<p>No commands configured.</p>';";
-  html += "});";
-  html += "</script></body></html>";
-
-  server.send(200, "text/html", html);
-}
-
-// ============ TWITCH API HANDLERS ============
-void handleTwitchSaveConn() {
-  if (server.hasArg("enabled")) {
-    twitchEnabled = server.arg("enabled") == "1";
-  }
-  if (server.hasArg("channel")) {
-    twitchChannel = server.arg("channel");
-    twitchChannel.trim();
-  }
-  if (server.hasArg("nick")) {
-    twitchNick = server.arg("nick");
-    twitchNick.trim();
-  }
-  if (server.hasArg("oauth")) {
-    twitchOauth = server.arg("oauth");
-    twitchOauth.trim();
-  }
-  
-  saveTwitchSettings();
-  
-  if (twitchEnabled) {
-    twitchClient.stop();
-    connectToTwitch();
-  }
-  
-  server.send(200, "text/plain", "Connection settings saved!");
-}
-
-void handleTwitchTest() {
-  if (!twitchEnabled) {
-    server.send(200, "text/plain", "Twitch is disabled");
-    return;
-  }
-  
-  if (twitchClient.connected()) {
-    server.send(200, "text/plain", "✅ Connected to Twitch!\nChannel: #" + twitchChannel);
-  } else {
-    server.send(200, "text/plain", "❌ Not connected. Check your settings and try again.");
-  }
-}
-
-void handleTwitchToggleCmd() {
-  int index = server.arg("index").toInt();
-  bool enabled = server.arg("enabled") == "1";
-  
-  if (index >= 0 && index < twitchCommandCount) {
-    twitchCommands[index].enabled = enabled;
-    saveTwitchSettings();
-    server.send(200, "text/plain", "OK");
-  } else {
-    server.send(400, "text/plain", "Invalid index");
-  }
-}
-
-void handleTwitchDeleteCmd() {
-  int index = server.arg("index").toInt();
-  
-  if (index >= 0 && index < twitchCommandCount) {
-    // Shift all commands down
-    for (int i = index; i < twitchCommandCount - 1; i++) {
-      twitchCommands[i] = twitchCommands[i + 1];
-    }
-    twitchCommandCount--;
-    
-    saveTwitchSettings();
-    server.send(200, "text/plain", "Command deleted");
-    logInfo("Deleted Twitch command at index " + String(index));
-  } else {
-    server.send(400, "text/plain", "Invalid index");
-  }
-}
-
-
-// ============ EXISTING WEB HANDLERS (from original code) ============
-void handleState() {
-  //logDebug("WEB", "/state request");
-  
-  DynamicJsonDocument doc(4096);
-  
-  doc["uptime"] = getUptimeString();
-
-  JsonObject pos = doc.createNestedObject("pos");
-  pos["X"] = currentPos.X;
-  pos["Y"] = currentPos.Y;
-  pos["Z"] = currentPos.Z;
-  pos["E"] = currentPos.E;
-  
-  JsonArray messages = doc.createNestedArray("messages");
-  
-  int startIdx = (consoleCount < CONSOLE_BUFFER_SIZE) ? 0 : consoleIndex;
-  int count = min(consoleCount, CONSOLE_BUFFER_SIZE);
-  
-  for (int i = 0; i < count; i++) {
-    int idx = (startIdx + i) % CONSOLE_BUFFER_SIZE;
-    JsonObject msg = messages.createNestedObject();
-    msg["time"] = consoleBuffer[idx].time;
-    msg["type"] = consoleBuffer[idx].type;
-    msg["text"] = consoleBuffer[idx].text;
-  }
-  
-  String response;
-  serializeJson(doc, response);
-  server.send(200, "application/json", response);
-}
-
-void handleSend() {
-  if (server.hasArg("cmd")) {
-    String cmd = server.arg("cmd");
-    logDebug("WEB", "/send command: " + cmd);
-    sendGcode(cmd);
-    
-    if (cmd.indexOf("M42 P0 S255") >= 0) {
-      lightState = true;
-    } else if (cmd.indexOf("M42 P0 S0") >= 0) {
-      lightState = false;
-    }
-  }
-  server.send(200, "application/json", "{\"status\":\"ok\"}");
-}
-
-void handleMove() {
-  if (server.hasArg("axis") && server.hasArg("distance") && server.hasArg("speed")) {
-    String axisStr = server.arg("axis");
-    float distance = server.arg("distance").toFloat();
-    int speed = server.arg("speed").toInt();
-    
-    logDebug("WEB", "/move " + axisStr + " delta:" + String(distance, 2) + " F" + String(speed));
-    
-    if (axisStr.length() > 0) {
-      char axis = axisStr.charAt(0);
-      
-      // Get current position for this axis
-      float currentPos_axis = 0;
-      switch(axis) {
-        case 'X': currentPos_axis = currentPos.X; break;
-        case 'Y': currentPos_axis = currentPos.Y; break;
-        case 'Z': currentPos_axis = currentPos.Z; break;
-        default: currentPos_axis = 0; break;
-      }
-      
-      float targetPosition = currentPos_axis + distance;
-      
-      // ============ WALL AVOIDANCE ============
-      float targetX = currentPos.X;
-      float targetY = currentPos.Y;
-      float targetZ = currentPos.Z;
-      
-      switch(axis) {
-        case 'X': targetX = targetPosition; break;
-        case 'Y': targetY = targetPosition; break;
-        case 'Z': targetZ = targetPosition; break;
-      }
-      
-      // Case 1: Z is high and trying to move X/Y into danger
-      if (currentPos.Z > WALL_Z_TRIGGER && (axis == 'X' || axis == 'Y')) {
-        if (isInWallDangerZone(targetX, targetY, currentPos.Z)) {
-          logWarning("Cannot move X/Y into danger zone while Z is high - lowering Z first");
-          addToConsole("WALL AVOID: Lowering Z to " + String(WALL_Z_TRIGGER - 5, 1), "blocked");
-          
-          String lowerCmd = "G1 Z" + String(WALL_Z_TRIGGER - 5.0, 2) + " F5000";
-          sendGcodeRaw(lowerCmd);
-          currentPos.Z = WALL_Z_TRIGGER - 5.0;
-          delay(1000);  // Wait for Z to lower
-        }
-      }
-      
-      // Case 2: Raising Z while in danger zone
-      if (axis == 'Z' && targetZ > WALL_Z_TRIGGER) {
-        if (isInWallDangerZone(currentPos.X, currentPos.Y, targetZ)) {
-          logWarning("Cannot raise Z in danger zone - moving X/Y to safety first");
-          moveToSafePosition();
-        }
-      }
-      // ============ END WALL AVOIDANCE ============
-      
-      // Build G-code and send through main handler
-      String cmd = "G1 " + String(axis) + String(targetPosition, 2) + " F" + String(speed);
-      sendGcode(cmd, false);  // Don't echo, we already logged it
-      
-      server.send(200, "application/json", "{\"success\":true}");
-      return;
-    }
-  }
-  server.send(200, "application/json", "{\"success\":false}");
-}
-
-void handleUpdatePos() {
-  logDebug("WEB", "/updatepos request");
-  updatePositionInternal();
-  
-  unsigned long start = millis();
-  while (positionUpdatePending && (millis() - start) < 500) {
-    readPrinterBus();
-    yield();
-    delay(10);
-  }
-  
-  DynamicJsonDocument doc(256);
-  doc["status"] = "ok";
-  JsonObject pos = doc.createNestedObject("pos");
-  pos["X"] = currentPos.X;
-  pos["Y"] = currentPos.Y;
-  pos["Z"] = currentPos.Z;
-  pos["E"] = currentPos.E;
-  
-  String response;
-  serializeJson(doc, response);
-  server.send(200, "application/json", response);
-}
-
-void handleClaw() {
-  if (server.hasArg("angle")) {
-    int angle = server.arg("angle").toInt();
-    logDebug("WEB", "/claw angle=" + String(angle));
-    controlClaw("", angle);
-  } else if (server.hasArg("action")) {
-    String action = server.arg("action");
-    logDebug("WEB", "/claw action=" + action);
-    controlClaw(action);
-  }
-  server.send(200, "application/json", "{\"status\":\"ok\"}");
-}
-
-void handleClear() {
-  logDebug("WEB", "/clear console");
-  consoleIndex = 0;
-  consoleCount = 0;
-  server.send(200, "application/json", "{\"status\":\"ok\"}");
-}
-
-void handleToggleLight() {
-  lightState = !lightState;
-  logInfo("Light toggled: " + String(lightState ? "ON" : "OFF"));
-  String cmd = lightState ? "M42 P0 S255 I1" : "M42 P0 S0 I1";
-  sendGcode(cmd);
-  
-  DynamicJsonDocument doc(128);
-  doc["status"] = "ok";
-  doc["lighton"] = lightState;
-  
-  String response;
-  serializeJson(doc, response);
-  server.send(200, "application/json", response);
-}
-void handleSaveMacro() {
-  String name = server.arg("name");
-  String cmd = server.arg("cmd");
-  
-  logInfo("Saving macro '" + name + "': " + cmd);
-  
-  prefs.begin("claw-machine", false);  // ✅ OPEN
-  
-  for (int i = 0; i < 50; i++) {
-    String key = "macro" + String(i);
-    if (!prefs.isKey(key.c_str())) {
-      prefs.putString(key.c_str(), name + "|" + cmd);
-      prefs.end();  // ✅ CLOSE
-      server.send(200, "text/plain", "OK");
-      logDebug("MACRO", "Saved to slot " + String(i));
-      return;
-    } else {
-      String value = prefs.getString(key.c_str(), "");
-      int sep = value.indexOf('|');
-      if (sep > 0) {
-        String storedName = value.substring(0, sep);
-        if (storedName == name) {
-          prefs.putString(key.c_str(), name + "|" + cmd);
-          prefs.end();  // ✅ CLOSE
-          server.send(200, "text/plain", "OK");
-          logDebug("MACRO", "Updated slot " + String(i));
-          return;
-        }
-      }
-    }
-  }
-  
-  prefs.end();  // ✅ CLOSE
-  logError("No space for macro!");
-  server.send(500, "text/plain", "No space");
-}
-
-void handleGetMacros() {
-  logDebug("WEB", "/get-macros request");
-  
-  prefs.begin("claw-machine", true);  // ✅ OPEN (read-only)
-  
-  DynamicJsonDocument doc(2048);
-  
-  for (int i = 0; i < 50; i++) {
-    String key = "macro" + String(i);
-    if (prefs.isKey(key.c_str())) {
-      String value = prefs.getString(key.c_str(), "");
-      if (value.length() > 0) {
-        int sep = value.indexOf('|');
-        if (sep > 0) {
-          String name = value.substring(0, sep);
-          String cmd = value.substring(sep + 1);
-          doc[name] = cmd;
-        }
-      }
-    }
-  }
-  
-  prefs.end();  // ✅ CLOSE
-  
-  String out;
-  serializeJson(doc, out);
-  server.send(200, "application/json", out);
-}
-
-void handleDeleteMacro() {
-  String name = server.arg("name");
-  logInfo("Deleting macro: " + name);
-  
-  prefs.begin("claw-machine", false);  // ✅ OPEN
-  
-  for (int i = 0; i < 50; i++) {
-    String key = "macro" + String(i);
-    if (prefs.isKey(key.c_str())) {
-      String value = prefs.getString(key.c_str(), "");
-      int sep = value.indexOf('|');
-      if (sep > 0) {
-        String storedName = value.substring(0, sep);
-        if (storedName == name) {
-          prefs.remove(key.c_str());
-          logDebug("MACRO", "Deleted from slot " + String(i));
-          break;
-        }
-      }
-    }
-  }
-  
-  prefs.end();  // ✅ CLOSE
-  server.send(200, "text/plain", "OK");
-}
-
-void setupWebServer() {
-  // Main control page
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/state", HTTP_GET, handleState);
-  server.on("/send", HTTP_GET, handleSend);
-  server.on("/move", HTTP_GET, handleMove);
-  server.on("/updatepos", HTTP_GET, handleUpdatePos);
-  server.on("/claw", HTTP_GET, handleClaw);
-  server.on("/clear", HTTP_GET, handleClear);
-  server.on("/togglelight", HTTP_GET, handleToggleLight);
-  server.on("/save-macro", HTTP_GET, handleSaveMacro);
-  server.on("/get-macros", HTTP_GET, handleGetMacros);
-  server.on("/delete-macro", HTTP_GET, handleDeleteMacro);
-  server.on("/twitch-edit-cmd", HTTP_GET, handleTwitchEditCmd);
-  
-  // Twitch config page
-  server.on("/config", HTTP_GET, handleConfig);
-  server.on("/twitch-save-conn", HTTP_GET, handleTwitchSaveConn);
-  server.on("/twitch-test", HTTP_GET, handleTwitchTest);
-  server.on("/twitch-add-cmd", HTTP_GET, handleTwitchAddCmd);
-  server.on("/twitch-toggle-cmd", HTTP_GET, handleTwitchToggleCmd);
-  server.on("/twitch-delete-cmd", HTTP_GET, handleTwitchDeleteCmd);
-  server.on("/twitch-get-cmds", HTTP_GET, handleTwitchGetCmds);
-  
-  server.begin();
-  logInfo("Web server started");
-}
-
-// ============ SETUP ============
-void setup() {
-  pinMode(LED_PIN, OUTPUT);
-  ledOn();
-  
-  Serial.begin(115200);
-  delay(1000);
-  
-  logInfo("=================================");
-  logInfo("Creality Claw Machine Controller");
-  logInfo("=================================");
-  logInfo("Debug logging: " + String(DEBUG_LOGGING ? "ENABLED" : "DISABLED"));
-  
-  PrinterSerial.begin(115200, SERIAL_8N1, PRINTER_RX_PIN, PRINTER_TX_PIN);
-  delay(100);
-  while (PrinterSerial.available()) {
-    PrinterSerial.read();
-  }
-  logInfo("Printer serial initialized");
-  
-  clawServo.attach(SERVO_PIN);
-  setServoAngle(SERVO_OPEN_ANGLE);
-  
-  // Load Twitch settings
-  loadTwitchSettings();
-  
-  WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_18_5dBm);
-  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
-  WiFi.setHostname(hostname);
-  WiFi.begin(ssid, password);
-  
-  logInfo("Connecting to WiFi: " + String(ssid));
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts++ < 60) {
-    delay(500);
-    digitalWrite(LED_PIN, attempts % 2 == 0 ? LOW : HIGH);
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    ledSuccess();
-    logInfo("WiFi connected!");
-    logInfo("IP address: " + WiFi.localIP().toString());
-    logInfo("RSSI: " + String(WiFi.RSSI()) + " dBm");
-    
-    if (MDNS.begin(hostname)) {
-      MDNS.addService("http", "tcp", 80);
-      logInfo("mDNS started: http://" + String(hostname) + ".local");
-    }
-  } else {
-    WiFi.softAP("ClawMachineAP", "12345678");
-    ledError(3);
-    logWarning("WiFi failed, started AP mode");
-    logInfo("AP IP: " + WiFi.softAPIP().toString());
-  }
-  
-  ArduinoOTA.setHostname(hostname);
-  ArduinoOTA.onStart([]() { 
-    ledOn(); 
-    logInfo("OTA update started");
-  });
-  ArduinoOTA.onEnd([]() { 
-    ledOff(); 
-    logInfo("OTA update complete");
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    digitalWrite(LED_PIN, (progress / 1000) % 2);
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    logError("OTA error: " + String(error));
-  });
-  ArduinoOTA.begin();
-  logInfo("OTA enabled");
-  
-  setupWebServer();
-  
-    delay(500);
-  logInfo("Initializing printer...");
-  PrinterSerial.print("\n\n\n");
-  addToConsole("G28 Z", "tx");
-  sendGcodeRaw("G28 Z\r\n");
-  delay(2000);
-  addToConsole("G28 X Y", "tx");
-  sendGcodeRaw("G28 X Y\r\n");
-  delay(2000);
-  addToConsole("G28 Z", "tx");
-  sendGcodeRaw("G28 Z\r\n");
-  delay(1000);
-  addToConsole("G90", "tx");  // ✅ CHANGED: Absolute positioning
-  sendGcodeRaw("G90\r\n");
-  updatePositionInternal();
-  addToConsole("M203 Z30", "tx");
-  sendGcodeRaw("M203 Z30\r\n");
-
-  // Connect to Twitch if enabled
-  if (twitchEnabled) {
-    connectToTwitch();
-  }
-  
-  ledOff();
-  logInfo("=================================");
-  logInfo("Setup complete - Ready!");
-  logInfo("=================================");
-}
-
-// ============ LOOP ============
-void loop() {
-  ArduinoOTA.handle();
-  server.handleClient();
-  readPrinterBus();
-  handleTwitch();  // NEW: Process Twitch messages
-  heartbeatLED();
-  handleLEDBlink();
-  checkWiFi();
-  yield();
 }
