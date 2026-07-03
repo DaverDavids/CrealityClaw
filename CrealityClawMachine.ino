@@ -24,7 +24,7 @@ HardwareSerial PrinterSerial(1);
 // Servo configuration
 Servo clawServo;
 int SERVO_OPEN_ANGLE = 0;
-int SERVO_CLOSE_ANGLE = 60;
+int SERVO_CLOSE_ANGLE = 45;
 
 // WiFi credentials
 const char* ssid = MYSSIDIOT;
@@ -1872,7 +1872,7 @@ void setup() {
   loadTwitchSettings();
   
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_18_5dBm);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
   WiFi.setHostname(hostname);
   WiFi.begin(ssid, password);
