@@ -136,16 +136,15 @@ static const char ROOT_HTML_CONTROLS[] PROGMEM =
     "<input type=\"number\" id=\"bedY\" value=\"50\" min=\"0\" max=\"100\" step=\"0.1\">"
     "<label>%</label></div>"
   "<button class=\"btn-primary\" onclick=\"moveToPercent()\">\xF0\x9F\x93\x8D Move To Position</button>"
-  "<div style=\"margin-top:10px;border-top:1px solid #7f8c8d;padding-top:10px;\">"
-  "<span style=\"font-size:13px;color:#95a5a6;\">Camera Offset (mm):</span>"
+  "</div><div class=\"bed-controls\" style=\"margin-top:5px;\">"
+  "<span style=\"color:#95a5a6;font-size:13px;\">Offset:</span>"
   "<div class=\"coord-input\"><label>X:</label>"
-    "<input type=\"number\" id=\"camOffsetX\" value=\"0\" step=\"0.1\" style=\"width:70px;\">"
+    "<input type=\"number\" id=\"camOffsetX\" value=\"0\" step=\"0.1\" style=\"width:60px;\">"
   "</div>"
   "<div class=\"coord-input\"><label>Y:</label>"
-    "<input type=\"number\" id=\"camOffsetY\" value=\"0\" step=\"0.1\" style=\"width:70px;\">"
+    "<input type=\"number\" id=\"camOffsetY\" value=\"0\" step=\"0.1\" style=\"width:60px;\">"
   "</div>"
-  "<button class=\"btn-info\" onclick=\"saveCameraOffsets()\" style=\"font-size:12px;padding:6px 12px;\">\xF0\x9F\x92\xBE Save Offsets</button>"
-  "</div>"
+  "<button class=\"btn-info\" onclick=\"saveCameraOffsets()\" style=\"font-size:11px;padding:6px 10px;\">\xF0\x9F\x92\xBE Save</button>"
   "</div></div></div></div>";
 
 // JS is split into two parts around the dynamic MIN_X/Y MAX_X/Y constants
