@@ -136,6 +136,16 @@ static const char ROOT_HTML_CONTROLS[] PROGMEM =
     "<input type=\"number\" id=\"bedY\" value=\"50\" min=\"0\" max=\"100\" step=\"0.1\">"
     "<label>%</label></div>"
   "<button class=\"btn-primary\" onclick=\"moveToPercent()\">\xF0\x9F\x93\x8D Move To Position</button>"
+  "<div style=\"margin-top:10px;border-top:1px solid #7f8c8d;padding-top:10px;\">"
+  "<span style=\"font-size:13px;color:#95a5a6;\">Camera Offset (mm):</span>"
+  "<div class=\"coord-input\"><label>X:</label>"
+    "<input type=\"number\" id=\"camOffsetX\" value=\"0\" step=\"0.1\" style=\"width:70px;\">"
+  "</div>"
+  "<div class=\"coord-input\"><label>Y:</label>"
+    "<input type=\"number\" id=\"camOffsetY\" value=\"0\" step=\"0.1\" style=\"width:70px;\">"
+  "</div>"
+  "<button class=\"btn-info\" onclick=\"saveCameraOffsets()\" style=\"font-size:12px;padding:6px 12px;\">\xF0\x9F\x92\xBE Save Offsets</button>"
+  "</div>"
   "</div></div></div></div>";
 
 // JS is split into two parts around the dynamic MIN_X/Y MAX_X/Y constants
@@ -146,6 +156,9 @@ static const char ROOT_HTML_JS_PRE[] PROGMEM =
 static const char ROOT_HTML_JS_MID1[] PROGMEM = ";const MIN_Y=";  // + String(MIN_Y,1)
 static const char ROOT_HTML_JS_MID2[] PROGMEM = ";const MAX_X=";  // + String(MAX_X,1)
 static const char ROOT_HTML_JS_MID3[] PROGMEM = ";const MAX_Y=";  // + String(MAX_Y,1)
+
+static const char ROOT_HTML_JS_MID4[] PROGMEM = ";const X_CAMERA_OFFSET=";
+static const char ROOT_HTML_JS_MID5[] PROGMEM = ";const Y_CAMERA_OFFSET=";
 
 static const char ROOT_HTML_JS_POST[] PROGMEM =
   ";"
@@ -189,8 +202,6 @@ static const char ROOT_HTML_JS_POST[] PROGMEM =
     "var yPercent=parseFloat(document.getElementById('bedY').value);"
     "xPercent=Math.max(0,Math.min(100,xPercent));"
     "yPercent=Math.max(0,Math.min(100,yPercent));"
-    "const X_CAMERA_OFFSET=0;"
-    "const Y_CAMERA_OFFSET=10;"
     "var targetX=MIN_X+(MAX_X-MIN_X)*xPercent/100+X_CAMERA_OFFSET;"
     "var targetY=MIN_Y+(MAX_Y-MIN_Y)*yPercent/100+Y_CAMERA_OFFSET;"
     "var cmd='G1 X'+targetX.toFixed(2)+' Y'+targetY.toFixed(2)+' F3000';"
@@ -268,10 +279,22 @@ static const char ROOT_HTML_JS_POST[] PROGMEM =
         "item.appendChild(btn);item.appendChild(editBtn);"
         "list.appendChild(item);"
       "}}});}"
+  "function loadCameraOffsets(){"
+    "fetch('/camera-offset').then(r=>r.json()).then(function(d){"
+      "document.getElementById('camOffsetX').value=d.xOffset;"
+      "document.getElementById('camOffsetY').value=d.yOffset;"
+    "});}"
+  "function saveCameraOffsets(){"
+    "var x=document.getElementById('camOffsetX').value;"
+    "var y=document.getElementById('camOffsetY').value;"
+    "fetch('/camera-offset?x='+x+'&y='+y).then(function(){"
+      "loadCameraOffsets();location.reload();"
+    "});}"
   "drawBed();"
   "setInterval(updateState,500);"
   "updateState();"
   "loadMacros();"
+  "loadCameraOffsets();"
   "</script></body></html>";
 
 
@@ -425,9 +448,10 @@ static const char CONFIG_HTML_JS[] PROGMEM =
 //  Build functions — called from handleRoot() / handleConfig()
 // ============================================================
 
-inline String buildRootHTML(float minX, float minY, float maxX, float maxY) {
+inline String buildRootHTML(float minX, float minY, float maxX, float maxY,
+                            float xCamOffset, float yCamOffset) {
   String html;
-  html.reserve(14000);
+  html.reserve(15000);
   html += FPSTR(ROOT_HTML_HEAD);
   html += FPSTR(ROOT_HTML_HEADER);
   html += FPSTR(ROOT_HTML_CONSOLE);
@@ -440,6 +464,10 @@ inline String buildRootHTML(float minX, float minY, float maxX, float maxY) {
   html += String(maxX, 1);
   html += FPSTR(ROOT_HTML_JS_MID3);
   html += String(maxY, 1);
+  html += FPSTR(ROOT_HTML_JS_MID4);
+  html += String(xCamOffset, 1);
+  html += FPSTR(ROOT_HTML_JS_MID5);
+  html += String(yCamOffset, 1);
   html += FPSTR(ROOT_HTML_JS_POST);
   return html;
 }

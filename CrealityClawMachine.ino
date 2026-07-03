@@ -39,6 +39,10 @@ const float MAX_X = 233.0;
 const float MAX_Y = 232.0;
 const float MAX_Z = 237.0;
 
+// Camera offsets (persisted in NVS)
+float X_CAMERA_OFFSET = 0.0;
+float Y_CAMERA_OFFSET = 0.0;
+
 // Wall avoidance for drop zone (lower-left corner)
 const float WALL_X_THRESHOLD = 90.0;   // Wall at X=82 (corner)
 const float WALL_Y_THRESHOLD = 95.0;   // Wall at Y=90 (corner)
@@ -113,6 +117,8 @@ void processTwitchMessage(String message, String username);
 void connectToTwitch();
 void loadTwitchSettings();
 void saveTwitchSettings();
+void loadCameraOffsets();
+void saveCameraOffsets();
 
 // ============ LOGGING FUNCTIONS ============
 String getLogTimestamp() {
@@ -403,6 +409,22 @@ void saveTwitchSettings() {
   
   prefs.end();
   logInfo("Saved Twitch settings");
+}
+
+void loadCameraOffsets() {
+  prefs.begin("offsets", true);
+  X_CAMERA_OFFSET = prefs.getFloat("xOff", 0.0);
+  Y_CAMERA_OFFSET = prefs.getFloat("yOff", 0.0);
+  prefs.end();
+  logInfo("Loaded camera offsets: X=" + String(X_CAMERA_OFFSET, 1) + " Y=" + String(Y_CAMERA_OFFSET, 1));
+}
+
+void saveCameraOffsets() {
+  prefs.begin("offsets", false);
+  prefs.putFloat("xOff", X_CAMERA_OFFSET);
+  prefs.putFloat("yOff", Y_CAMERA_OFFSET);
+  prefs.end();
+  logInfo("Saved camera offsets: X=" + String(X_CAMERA_OFFSET, 1) + " Y=" + String(Y_CAMERA_OFFSET, 1));
 }
 
 void moveToSafePosition() {
@@ -1220,8 +1242,8 @@ void processTwitchMessage(String message, String username) {
               if (xPct < 0) xPct = 0; if (xPct > 100) xPct = 100;
               if (yPct < 0) yPct = 0; if (yPct > 100) yPct = 100;
 
-              float targetX = MIN_X + (MAX_X - MIN_X) * (xPct / 100.0f);
-              float targetY = MIN_Y + (MAX_Y - MIN_Y) * (yPct / 100.0f);
+              float targetX = MIN_X + (MAX_X - MIN_X) * (xPct / 100.0f) + X_CAMERA_OFFSET;
+              float targetY = MIN_Y + (MAX_Y - MIN_Y) * (yPct / 100.0f) + Y_CAMERA_OFFSET;
               
               int feedrate = 7000;
               if (tokCount >= 3) {
@@ -1466,7 +1488,7 @@ void handleTwitch() {
 // Main control page (same as before, with config link added)
 void handleRoot() {
   logDebug("WEB", "/ request from " + server.client().remoteIP().toString());
-  String html = buildRootHTML(MIN_X, MIN_Y, MAX_X, MAX_Y);
+  String html = buildRootHTML(MIN_X, MIN_Y, MAX_X, MAX_Y, X_CAMERA_OFFSET, Y_CAMERA_OFFSET);
   server.send(200, "text/html", html);
   logInfo("Sent HTML page (" + String(html.length()) + " bytes)");
 }
@@ -1725,6 +1747,22 @@ void handleToggleLight() {
   serializeJson(doc, response);
   server.send(200, "application/json", response);
 }
+
+void handleCameraOffset() {
+  if (server.hasArg("x") && server.hasArg("y")) {
+    X_CAMERA_OFFSET = server.arg("x").toFloat();
+    Y_CAMERA_OFFSET = server.arg("y").toFloat();
+    saveCameraOffsets();
+  }
+
+  DynamicJsonDocument doc(128);
+  doc["xOffset"] = X_CAMERA_OFFSET;
+  doc["yOffset"] = Y_CAMERA_OFFSET;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
 void handleSaveMacro() {
   String name = server.arg("name");
   String cmd = server.arg("cmd");
@@ -1840,6 +1878,7 @@ void setupWebServer() {
   server.on("/twitch-toggle-cmd", HTTP_GET, handleTwitchToggleCmd);
   server.on("/twitch-delete-cmd", HTTP_GET, handleTwitchDeleteCmd);
   server.on("/twitch-get-cmds", HTTP_GET, handleTwitchGetCmds);
+  server.on("/camera-offset", HTTP_GET, handleCameraOffset);
   
   server.begin();
   logInfo("Web server started");
@@ -1868,8 +1907,9 @@ void setup() {
   clawServo.attach(SERVO_PIN);
   setServoAngle(SERVO_OPEN_ANGLE);
   
-  // Load Twitch settings
+  // Load persistent settings
   loadTwitchSettings();
+  loadCameraOffsets();
   
   WiFi.mode(WIFI_STA);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
