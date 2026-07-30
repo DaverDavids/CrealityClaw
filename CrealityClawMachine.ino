@@ -64,6 +64,8 @@ String twitchChannel = "";
 String twitchOauth = "";
 String twitchNick = "";
 unsigned long lastTwitchReconnect = 0;
+unsigned long lastTwitchDataTime = 0;
+const unsigned long TWITCH_DATA_TIMEOUT = 300000; // 5 min — force reconnect if no data
 
 // Twitch Command Structure
 #define MAX_TWITCH_COMMANDS 20
@@ -228,24 +230,42 @@ void heartbeatLED() {
   }
 }
 
+// ============ NETWORK SERVICE (non-blocking yield) ============
+// Call during any wait loop so web server, OTA, and mDNS stay alive.
+inline void serviceNetwork() {
+  server.handleClient();
+  ArduinoOTA.handle();
+  yield();
+}
+
 // ============ WiFi RECONNECTION ============
 void checkWiFi() {
   if (millis() - lastWiFiCheck > 30000) {
     lastWiFiCheck = millis();
     
     if (WiFi.status() != WL_CONNECTED) {
-      logWarning("WiFi disconnected! Attempting reconnection...");
+      logWarning("WiFi lost! Attempting reconnection...");
       WiFi.disconnect();
       WiFi.begin(ssid, password);
       
       int attempts = 0;
       while (WiFi.status() != WL_CONNECTED && attempts++ < 20) {
         delay(500);
-        yield();
+        serviceNetwork();
       }
       
       if (WiFi.status() == WL_CONNECTED) {
         logInfo("WiFi reconnected! IP: " + WiFi.localIP().toString());
+        
+        // Re-register mDNS so Arduino IDE can find the board for OTA
+        MDNS.end();
+        if (MDNS.begin(hostname)) {
+          MDNS.addService("http", "tcp", 80);
+          logInfo("mDNS re-registered");
+        }
+        ArduinoOTA.end();
+        ArduinoOTA.begin();
+        logInfo("OTA re-initialized");
       } else {
         logError("WiFi reconnection failed!");
       }
@@ -493,7 +513,7 @@ void moveToSafePosition() {
   unsigned long start = millis();
   while (positionUpdatePending && (millis() - start) < 1000) {
     readPrinterBus();
-    yield();
+    serviceNetwork();
     delay(10);
   }
   
@@ -692,7 +712,7 @@ void sendGcode(String command, bool echo = true) {
     unsigned long start = millis();
     while (positionUpdatePending && (millis() - start) < 500) {
       readPrinterBus();
-      yield();
+      serviceNetwork();
       delay(10);
     }
     
@@ -729,7 +749,7 @@ void sendGcode(String command, bool echo = true) {
         unsigned long waitstart = millis();
         while (positionUpdatePending && (millis() - waitstart) < 1000) {
           readPrinterBus();
-          yield();
+          serviceNetwork();
           delay(10);
         }
         logInfo("Z lowered. Now safe to move XY");
@@ -745,7 +765,7 @@ void sendGcode(String command, bool echo = true) {
         start = millis();
         while (positionUpdatePending && (millis() - start) < 500) {
           readPrinterBus();
-          yield();
+          serviceNetwork();
           delay(10);
         }
       }
@@ -1033,23 +1053,32 @@ void connectToTwitch() {
     return;
   }
   
+  addToConsole("TWITCH: Connecting to IRC...", "tx");
   logInfo("Connecting to Twitch IRC...");
   
+  if (twitchClient.connected()) {
+    twitchClient.stop();
+    logInfo("Closed previous Twitch connection");
+    unsigned long t = millis(); while (millis() - t < 200) serviceNetwork();
+  }
+  
   if (twitchClient.connect("irc.chat.twitch.tv", 6667)) {
-    logInfo("✓ Connected to Twitch server");
+    lastTwitchDataTime = millis();
+    addToConsole("TWITCH: Connected to server", "rx");
+    logInfo("Connected to Twitch server");
     
     // Request capabilities
     twitchClient.println("CAP REQ :twitch.tv/tags twitch.tv/commands");
-    delay(100);
+    unsigned long t1 = millis(); while (millis() - t1 < 100) serviceNetwork();
     
     // Authenticate
     logDebug("TWITCH-AUTH", "Sending PASS (oauth hidden)");
     twitchClient.println("PASS " + twitchOauth);
-    delay(100);
+    unsigned long t2 = millis(); while (millis() - t2 < 100) serviceNetwork();
     
     logDebug("TWITCH-AUTH", "Sending NICK: " + twitchNick);
     twitchClient.println("NICK " + twitchNick);
-    delay(100);
+    unsigned long t3 = millis(); while (millis() - t3 < 100) serviceNetwork();
     
     String channelWithHash = twitchChannel;
     if (!channelWithHash.startsWith("#")) {
@@ -1058,22 +1087,25 @@ void connectToTwitch() {
     logDebug("TWITCH-AUTH", "Joining channel: " + channelWithHash);
     twitchClient.println("JOIN " + channelWithHash);
 
-    logInfo("✓ Sent JOIN command for: " + twitchChannel);
+    logInfo("Sent JOIN command for: " + twitchChannel);
     
     // Wait for response and log it
     unsigned long startTime = millis();
-    while (millis() - startTime < 3000) {  // Wait 3 seconds for responses
+    while (millis() - startTime < 3000) {
       while (twitchClient.available()) {
         String response = twitchClient.readStringUntil('\n');
         response.trim();
         if (response.length() > 0) {
+          lastTwitchDataTime = millis();
           logInfo("TWITCH RESPONSE: " + response);
         }
       }
       delay(50);
+      serviceNetwork();
     }
   } else {
-    logError("✗ Failed to connect to Twitch IRC server");
+    addToConsole("TWITCH: Connection FAILED", "blocked");
+    logError("Failed to connect to Twitch IRC server");
   }
 }
 
@@ -1105,11 +1137,11 @@ void flushTwitchBacklog(uint32_t quietMs = 250, uint32_t maxMs = 2000) {
 
   while ((millis() - lastRx) < quietMs && (millis() - start) < maxMs) {
     if (twitchClient.available()) {
-      handleTwitch();          // drains lines; PING->PONG; PRIVMSG dropped by commandInProgress gate
+      handleTwitch();
       lastRx = millis();
     } else {
+      serviceNetwork();
       delay(5);
-      yield();
     }
   }
 }
@@ -1130,7 +1162,7 @@ void processTwitchMessage(String message, String username) {
     // Check if message STARTS with the trigger word
     if (lowerMsg.startsWith(trigger)) {
       logInfo("✓ Trigger matched: " + twitchCommands[i].trigger);
-      
+      addToConsole("TWITCH: " + username + " -> " + twitchCommands[i].trigger + " (" + message + ")", "rx");
       String vars[10];
       String varNames[10];
       int varCount = 0;
@@ -1179,7 +1211,6 @@ void processTwitchMessage(String message, String username) {
         break;
       }
       
-      addToConsole("TWITCH: " + twitchCommands[i].trigger, "rx");
       commandInProgress = true;
 
       // Execute Actions
@@ -1206,7 +1237,9 @@ void processTwitchMessage(String message, String username) {
             else controlClaw("", ca.toInt());
           } 
           else if (action.startsWith("DELAY:")) {
-             delay(action.substring(6).toInt());
+             unsigned long d = action.substring(6).toInt();
+             unsigned long dt = millis();
+             while (millis() - dt < d) serviceNetwork();
           }
           else if (action.startsWith("MOVEPCT:")) {
             String params = action.substring(8);
@@ -1380,8 +1413,20 @@ void handleTwitch() {
   if (!twitchClient.connected()) {
     if (millis() - lastTwitchReconnect > 10000) {
       lastTwitchReconnect = millis();
+      addToConsole("TWITCH: Disconnected, reconnecting...", "blocked");
       connectToTwitch();
     }
+    return;
+  }
+
+  // Force reconnect if no data received for too long (connection likely dead)
+  if (lastTwitchDataTime > 0 && (millis() - lastTwitchDataTime) > TWITCH_DATA_TIMEOUT) {
+    logWarning("Twitch data timeout — no data in 5 min, forcing reconnect");
+    addToConsole("TWITCH: No data received, reconnecting...", "blocked");
+    twitchClient.stop();
+    lastTwitchDataTime = 0;
+    lastTwitchReconnect = millis();
+    connectToTwitch();
     return;
   }
 
@@ -1391,6 +1436,7 @@ void handleTwitch() {
 
     if (line.length() == 0) continue;
 
+    lastTwitchDataTime = millis();
     logDebug("TWITCH-RAW", line);
 
     // Handle PING
@@ -1409,7 +1455,8 @@ void handleTwitch() {
 
     // **CHECK FOR SUCCESSFUL JOIN**
     if (line.indexOf("JOIN") >= 0 && line.indexOf(twitchNick) >= 0) {
-      logInfo("✓ Bot successfully joined channel");
+      addToConsole("TWITCH: Joined #" + twitchChannel, "rx");
+      logInfo("Bot successfully joined channel");
       continue;
     }
 
@@ -1665,7 +1712,7 @@ void handleMove() {
           String lowerCmd = "G1 Z" + String(WALL_Z_TRIGGER - 5.0, 2) + " F5000";
           sendGcodeRaw(lowerCmd);
           currentPos.Z = WALL_Z_TRIGGER - 5.0;
-          delay(1000);  // Wait for Z to lower
+          unsigned long zt = millis(); while (millis() - zt < 1000) serviceNetwork();
         }
       }
       
