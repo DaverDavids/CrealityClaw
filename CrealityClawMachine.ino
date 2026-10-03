@@ -245,6 +245,9 @@ void checkWiFi() {
     
     if (WiFi.status() != WL_CONNECTED) {
       logWarning("WiFi lost! Attempting reconnection...");
+      // Force STA-only so a lingering AP (APSTA) can't survive the reconnect
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
       WiFi.disconnect();
       WiFi.begin(ssid, password);
       
